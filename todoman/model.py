@@ -3,7 +3,7 @@ import os
 import socket
 import sqlite3
 from datetime import date, datetime, timedelta
-from os.path import normpath, split
+from pathlib import Path, PosixPath
 from uuid import uuid4
 
 import icalendar
@@ -23,6 +23,10 @@ LOCAL_TIMEZONE = tzlocal()
 
 
 def register_adapters_and_converters():
+    sqlite3.register_adapter(Path, str)
+    sqlite3.register_adapter(PosixPath, str)
+
+    sqlite3.register_converter('path', lambda p: Path(p.decode()))
     sqlite3.register_converter(
         'timestamp',
         lambda d: datetime.fromtimestamp(float(d), LOCAL_TIMEZONE)
@@ -242,7 +246,7 @@ class Todo:
 
     @cached_property
     def path(self):
-        return os.path.join(self.list.path, self.filename)
+        return self.list.path.joinpath(self.filename)
 
     def cancel(self):
         self.status = 'CANCELLED'
@@ -340,7 +344,7 @@ class VtodoWritter:
                 return component
 
     def write(self):
-        if os.path.exists(self.todo.path):
+        if self.todo.path.exists():
             self._write_existing(self.todo.path)
         else:
             self._write_new(self.todo.path)
@@ -390,8 +394,10 @@ class Cache:
     SCHEMA_VERSION = 5
 
     def __init__(self, path):
-        self.cache_path = str(path)
-        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+        self.cache_path = path
+        # XXX: Use the below once we drop python3.4
+        # self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        os.makedirs(self.cache_path.parent, exist_ok=True)
 
         self._conn = sqlite3.connect(
             str(self.cache_path),
@@ -438,7 +444,7 @@ class Cache:
             '''
             CREATE TABLE IF NOT EXISTS lists (
                 "name" TEXT PRIMARY KEY,
-                "path" TEXT,
+                "path" path,
                 "colour" TEXT,
                 CONSTRAINT path_unique UNIQUE (path)
             );
@@ -448,7 +454,7 @@ class Cache:
         self._conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS files (
-                "path" TEXT PRIMARY KEY,
+                "path" path PRIMARY KEY,
                 "list_name" TEXT,
                 "mtime" INTEGER,
 
@@ -461,7 +467,7 @@ class Cache:
         self._conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS todos (
-                "file_path" TEXT,
+                "file_path" path,
 
                 "id" INTEGER PRIMARY KEY,
                 "uid" TEXT,
@@ -488,7 +494,7 @@ class Cache:
 
     def clear(self):
         self._conn.close()
-        os.remove(self.cache_path)
+        self.cache_path.unlink
         self._conn = None
 
     def add_list(self, name, path, colour):
@@ -684,7 +690,7 @@ class Cache:
             params.extend(s.upper() for s in status)
 
         if lists:
-            lists = [l.name if isinstance(l, List) else l for l in lists]
+            lists = [str(l) for l in lists]
             q = ', '.join(['?'] * len(lists))
             extra_where.append('AND files.list_name IN ({})'.format(q))
             params.extend(lists)
@@ -789,7 +795,7 @@ class Cache:
         todo.sequence = row['sequence']
         todo.last_modified = row['last_modified']
         todo.list = self.lists_map[row['list_name']]
-        todo.filename = os.path.basename(row['path'])
+        todo.filename = row['path'].name
         todo.rrule = row['rrule']
         return todo
 
@@ -864,18 +870,16 @@ class List:
     @staticmethod
     def colour_for_path(path):
         try:
-            with open(os.path.join(path, 'color')) as f:
-                return f.read().strip()
+            return path.joinpath('color').read_text().strip()
         except (OSError, IOError):
             logger.debug('No colour for list %s', path)
 
     @staticmethod
     def name_for_path(path):
         try:
-            with open(os.path.join(path, 'displayname')) as f:
-                return f.read().strip()
+            return path.joinpath('displayname').read_text().strip()
         except (OSError, IOError):
-            return split(normpath(path))[1]
+            return path.name
 
     def __eq__(self, other):
         if isinstance(other, List):
@@ -896,8 +900,8 @@ class Database:
     """
 
     def __init__(self, paths, cache_path):
-        self.cache = Cache(cache_path)
-        self.paths = [str(path) for path in paths]
+        self.cache = Cache(Path(cache_path))
+        self.paths = [Path(path) for path in paths]
         self.update_cache()
 
     def update_cache(self):
@@ -912,13 +916,11 @@ class Database:
                 path,
                 List.colour_for_path(path),
             )
-            for entry in os.listdir(path):
-                if not entry.endswith('.ics'):
+            for entry in path.iterdir():
+                if not entry.name.endswith('.ics'):
                     continue
-                entry_path = os.path.join(path, entry)
-                mtime = _getmtime(entry_path)
-                paths_to_mtime[entry_path] = mtime
-                paths_to_list_name[entry_path] = list_name
+                paths_to_mtime[entry] = _getmtime(entry)
+                paths_to_list_name[entry] = list_name
 
         self.cache.expire_files(paths_to_mtime)
 
@@ -932,11 +934,10 @@ class Database:
                 continue
 
             try:
-                with open(entry_path, 'rb') as f:
-                    cal = f.read()
-                    cal = icalendar.Calendar.from_ical(cal)
-                    for component in cal.walk('VTODO'):
-                        self.cache.add_vtodo(component, entry_path)
+                data = entry_path.read_bytes()
+                cal = icalendar.Calendar.from_ical(data)
+                for component in cal.walk('VTODO'):
+                    self.cache.add_vtodo(component, entry_path)
             except Exception as e:
                 logger.exception("Failed to read entry %s.", entry_path)
 
@@ -953,14 +954,13 @@ class Database:
 
     def move(self, todo, new_list, from_list=None):
         from_list = from_list or todo.list
-        orig_path = os.path.join(from_list.path, todo.filename)
-        dest_path = os.path.join(new_list.path, todo.filename)
+        orig_path = from_list.path.joinpath(todo.filename)
+        dest_path = new_list.path.joinpath(todo.filename)
 
-        os.rename(orig_path, dest_path)
+        orig_path.rename(dest_path)
 
     def delete(self, todo):
-        path = os.path.join(todo.list.path, todo.filename)
-        os.remove(path)
+        todo.list.path.joinpath(todo.filename).unlink()
 
     def flush(self):
         for todo in self.todos(status=['ANY']):
@@ -989,5 +989,5 @@ class Database:
 
 
 def _getmtime(path):
-    stat = os.stat(path)
+    stat = path.stat()
     return getattr(stat, 'st_mtime_ns', stat.st_mtime)
