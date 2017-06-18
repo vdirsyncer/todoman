@@ -22,6 +22,16 @@ logger = logging.getLogger(name=__name__)
 LOCAL_TIMEZONE = tzlocal()
 
 
+def register_adapters_and_converters():
+    sqlite3.register_converter(
+        'timestamp',
+        lambda d: datetime.fromtimestamp(float(d), LOCAL_TIMEZONE)
+    )
+
+
+register_adapters_and_converters()
+
+
 class cached_property:  # noqa
     '''A read-only @property that is only evaluated once. Only usable on class
     instances' methods.
@@ -383,7 +393,10 @@ class Cache:
         self.cache_path = str(path)
         os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
 
-        self._conn = sqlite3.connect(self.cache_path)
+        self._conn = sqlite3.connect(
+            str(self.cache_path),
+            detect_types=sqlite3.PARSE_DECLTYPES,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
 
@@ -453,13 +466,13 @@ class Cache:
                 "id" INTEGER PRIMARY KEY,
                 "uid" TEXT,
                 "summary" TEXT,
-                "due" INTEGER,
-                "start" INTEGER,
+                "due" timestamp,
+                "start" timestamp,
                 "priority" INTEGER,
-                "created_at" INTEGER,
-                "completed_at" INTEGER,
+                "created_at" timestamp,
+                "completed_at" timestamp,
                 "percent_complete" INTEGER,
-                "dtstamp" INTEGER,
+                "dtstamp" timestamp,
                 "status" TEXT,
                 "description" TEXT,
                 "location" TEXT,
@@ -758,22 +771,17 @@ class Cache:
             seen_paths.add(path)
             yield todo
 
-    def _dt_from_db(self, dt):
-        if dt:
-            return datetime.fromtimestamp(dt, LOCAL_TIMEZONE)
-        return None
-
     def _todo_from_db(self, row):
         todo = Todo()
         todo.id = row['id']
         todo.uid = row['uid']
         todo.summary = row['summary']
-        todo.due = self._dt_from_db(row['due'])
-        todo.start = self._dt_from_db(row['start'])
+        todo.due = row['due']
+        todo.start = row['start']
         todo.priority = row['priority']
-        todo.created_at = self._dt_from_db(row['created_at'])
-        todo.completed_at = self._dt_from_db(row['completed_at'])
-        todo.dtstamp = self._dt_from_db(row['dtstamp'])
+        todo.created_at = row['created_at']
+        todo.completed_at = row['completed_at']
+        todo.dtstamp = row['dtstamp']
         todo.percent_complete = row['percent_complete']
         todo.status = row['status']
         todo.description = row['description']
