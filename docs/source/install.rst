@@ -25,6 +25,11 @@ todoman is packaged in homebrew_, an can be installed using::
 
 .. _homebrew: https://formulae.brew.sh/formula/todoman
 
+Others
+~~~~~~
+
+[![Packaging status](https://repology.org/badge/vertical-allrepos/python:todoman.svg)](https://repology.org/project/python:todoman/versions)
+
 Installation via PIP
 --------------------
 
